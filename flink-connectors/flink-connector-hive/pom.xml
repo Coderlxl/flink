@@ -220,6 +220,12 @@ under the License.
 			<version>${project.version}</version>
 		</dependency>
 
+		<dependency>
+			<groupId>com.amazonaws</groupId>
+			<artifactId>aws-java-sdk-s3</artifactId>
+			<version>1.11.788</version>
+		</dependency>
+
 		<!-- Hadoop dependency -->
 		<!-- Hadoop as provided dependencies, so we can depend on them without pulling in Hadoop -->
 

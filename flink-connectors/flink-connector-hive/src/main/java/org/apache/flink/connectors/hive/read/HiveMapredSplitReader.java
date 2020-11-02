@@ -21,6 +21,8 @@ package org.apache.flink.connectors.hive.read;
 import org.apache.flink.api.java.hadoop.mapred.wrapper.HadoopDummyReporter;
 import org.apache.flink.connectors.hive.FlinkHiveException;
 import org.apache.flink.connectors.hive.HiveTablePartition;
+import org.apache.flink.connectors.hive.read.select.S3PushDownChecker;
+import org.apache.flink.connectors.hive.read.select.S3SelectCsvReader;
 import org.apache.flink.table.catalog.hive.client.HiveShim;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
@@ -36,6 +38,7 @@ import org.apache.hadoop.hive.serde2.SerDeUtils;
 import org.apache.hadoop.hive.serde2.objectinspector.StructField;
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
 import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.mapred.FileSplit;
 import org.apache.hadoop.mapred.InputFormat;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.JobConfigurable;
@@ -47,6 +50,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Properties;
 
 import static org.apache.hadoop.mapreduce.lib.input.FileInputFormat.INPUT_DIR;
 
@@ -58,6 +62,7 @@ public class HiveMapredSplitReader implements SplitReader {
 	private static final Logger LOG = LoggerFactory.getLogger(HiveMapredSplitReader.class);
 
 	private RecordReader<Writable, Writable> recordReader;
+	//	private RecordReader<Writable, Writable> recordReader;
 	protected Writable key;
 	protected Writable value;
 	private boolean fetched = false;
@@ -103,9 +108,54 @@ public class HiveMapredSplitReader implements SplitReader {
 		} else if (mapredInputFormat instanceof JobConfigurable) {
 			((JobConfigurable) mapredInputFormat).configure(jobConf);
 		}
-		//noinspection unchecked
-		this.recordReader = mapredInputFormat.getRecordReader(split.getHadoopInputSplit(),
-				jobConf, new HadoopDummyReporter());
+
+		FileSplit fileSplit = (FileSplit) split.getHadoopInputSplit();
+		Properties properties = hiveTablePartition.getTableProps();
+		if (S3PushDownChecker.shouldS3SelectPushDown(fileSplit.getPath().toString(), properties)) {
+			int[] sortedSelectedFields = selectedFields.clone();
+			Arrays.sort(sortedSelectedFields);
+
+			int columnNum = properties.get("columns").toString().split(",").length;
+			String[] columns = new String[columnNum];
+			if (sortedSelectedFields != null && sortedSelectedFields.length > 0) {
+				for (int i = 0; i < sortedSelectedFields.length; i++) {
+					//skip partition cols
+					if (sortedSelectedFields[i] >= columns.length) {
+						continue;
+					}
+
+					//0 -> s._1
+					columns[sortedSelectedFields[i]] = "s._" + (sortedSelectedFields[i] + 1);
+				}
+			}
+
+			//Construct ionSqlQuery
+			StringBuilder ionSqlQuery = new StringBuilder();
+			ionSqlQuery.append("SELECT ");
+			if (sortedSelectedFields != null && sortedSelectedFields.length > 0) {
+				for (int i = 0; i < columns.length; i++) {
+					if (columns[i] == null) {
+						ionSqlQuery.append("null");
+					} else {
+						ionSqlQuery.append(columns[i]);
+					}
+
+					if (i != columns.length - 1) {
+						ionSqlQuery.append(", ");
+					}
+				}
+			} else {
+				ionSqlQuery.append("*");
+			}
+			ionSqlQuery.append(" FROM S3Object s");
+
+			this.recordReader = new S3SelectCsvReader(jobConf, fileSplit, properties, ionSqlQuery.toString());
+		} else {
+			//noinspection unchecked
+			this.recordReader = mapredInputFormat.getRecordReader(split.getHadoopInputSplit(),
+					jobConf, new HadoopDummyReporter());
+		}
+
 		if (this.recordReader instanceof Configurable) {
 			((Configurable) this.recordReader).setConf(jobConf);
 		}
